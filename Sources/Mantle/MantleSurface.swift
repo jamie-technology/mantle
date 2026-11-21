@@ -34,6 +34,10 @@ struct MantleSurface: View, Animatable {
         let opacities = layout.opacities(top: top, among: drag.top != nil ? drag.snapFade : fadeDetents)
         let shape = RoundedRectangle(cornerRadius: layout.cornerRadius(top: top), style: .continuous)
         let isAtRest = layout.hasCollapsed && atRestTop && !isDragging
+        // Accessibility follows the settled detent, which only changes at rest, so it
+        // never restructures the view mid-drag.
+        let settledCollapsed = layout.hasCollapsed && current.isCollapsed
+        let settledOpacities = layout.opacities(top: layout.top(for: current), among: nil)
 
         ZStack(alignment: .topLeading) {
             if configuration.dimsBackground, layout.hasCollapsed {
@@ -41,7 +45,7 @@ struct MantleSurface: View, Animatable {
                     .opacity(0.25 * expansion)
                     .contentShape(.rect)
                     .onTapGesture { proxy.collapse() }
-                    .allowsHitTesting(!atRestTop && !isDragging)
+                    .allowsHitTesting(!atRestTop)
                     .accessibilityHidden(true)
             }
 
@@ -66,7 +70,7 @@ struct MantleSurface: View, Animatable {
                     // render tree, hitching the start of a drag.
                     .opacity(max(opacity, 0.001))
                     .allowsHitTesting(opacity > 0.5)
-                    .accessibilityHidden(opacity < 0.5)
+                    .accessibilityHidden((settledOpacities[entry.detent] ?? 0) < 0.5)
                 }
             }
             .scrollDisabled(!scrollEnabled)
@@ -78,13 +82,13 @@ struct MantleSurface: View, Animatable {
                 if showsGrabber {
                     ZStack(alignment: .top) {
                         // Once expanded, the strip around the grabber always drags the
-                        // sheet, even over a scrolling ScrollView.
-                        if expansion > 0.5 {
-                            Color.clear
-                                .frame(height: layout.grabberTop(frameTop: top) + 20)
-                                .frame(maxWidth: .infinity)
-                                .contentShape(.rect)
-                        }
+                        // sheet, even over a scrolling ScrollView. Always present (only
+                        // its hit-testing changes) so the tree doesn't change mid-drag.
+                        Color.clear
+                            .frame(height: layout.grabberTop(frameTop: top) + 20)
+                            .frame(maxWidth: .infinity)
+                            .contentShape(.rect)
+                            .allowsHitTesting(expansion > 0.5)
                         Capsule()
                             .fill(.secondary)
                             .frame(width: 36, height: 5)
@@ -105,9 +109,11 @@ struct MantleSurface: View, Animatable {
                 shape: shape
             ))
             .contentShape(shape)
-            .gesture(TapGesture().onEnded(tap), isEnabled: isAtRest)
-            .accessibilityElement(children: isAtRest ? .combine : .contain)
-            .accessibilityAddTraits(isAtRest ? .isButton : [])
+            // Always attached (checked when it fires) rather than enabled and
+            // disabled, which would change the gesture graph as a drag starts.
+            .gesture(TapGesture().onEnded { if isAtRest { tap() } })
+            .accessibilityElement(children: settledCollapsed ? .combine : .contain)
+            .accessibilityAddTraits(settledCollapsed ? .isButton : [])
             .accessibilityAction(named: "Expand") { proxy.expand() }
             .accessibilityAction(.escape) { proxy.collapse() }
             .position(x: frame.midX, y: frame.midY)
