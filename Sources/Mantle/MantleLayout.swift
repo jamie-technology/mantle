@@ -170,6 +170,30 @@ struct MantleLayout {
         return ((from - top) / (from - to)).clamped
     }
 
+    /// How the surface is placed for a given top edge: a laid-out `frame`, plus a
+    /// vertical `offset` applied as a render-time transform.
+    ///
+    /// While the collapsed bar morphs into the sheet, the frame itself changes
+    /// (width, height, corner radius). Once it's a full sheet, the frame is fixed
+    /// at full height (running off the bottom of the screen) and only the offset
+    /// changes. Like a UIKit sheet, it slides instead of resizing, so dragging
+    /// needs no layout and the background (notably Liquid Glass) isn't
+    /// re-rendered at a new size every frame. The two agree on screen where they
+    /// meet; they differ only below the bottom edge.
+    func placement(top: CGFloat) -> (frame: CGRect, offset: CGFloat) {
+        let sheetTop = hasCollapsed && entries.count > 1 ? entries[1].top : restTop
+        let morphing = hasCollapsed && (entries.count == 1 || top > sheetTop)
+        guard !morphing else { return (frame(top: top), 0) }
+        // Tall enough to stay off the bottom of the screen while rubber-banding
+        // above the largest detent.
+        let anchor = largestTop
+        let frame = CGRect(x: 0, y: anchor, width: size.width, height: size.height - anchor + Self.overscroll)
+        return (frame, top - anchor)
+    }
+
+    /// Extra sheet height below the screen, covering upward rubber-banding.
+    private static let overscroll: CGFloat = 120
+
     func frame(top: CGFloat) -> CGRect {
         let p = expansion(top: top)
         let inset = collapsed.horizontalInset * (1 - p)

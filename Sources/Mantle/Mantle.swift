@@ -152,6 +152,41 @@ private struct MantleStateHost<Detents: View>: View {
 
 // MARK: - Host
 
+/// Live drag and snap state. Per-frame changes stay out of `MantleHost`, whose
+/// render re-resolves the detent subviews and rebuilds the layout, and out of the
+/// selection binding, which re-renders whatever owns it. Those expensive updates
+/// happen once a snap has landed, when nothing is moving.
+///
+/// Observed per property: `MantleSurfaceDriver` reads `top`; `MantleSurface`
+/// reads `isActive` and `snapFade`. The host reads none of them.
+@MainActor @Observable
+final class MantleDragModel {
+    /// The surface's top edge while dragging or snapping; `nil` at rest.
+    var top: CGFloat?
+    /// Dragging or snapping.
+    var isActive = false
+    /// Cross-fade restriction for the current snap (see `fadeDetents`).
+    var snapFade: Set<MantleDetent>?
+    @ObservationIgnored var startTop: CGFloat?
+    /// Bumped by every snap, so a superseded snap's completion does nothing.
+    @ObservationIgnored var snapID = 0
+}
+
+/// Feeds the surface its top edge: the drag model's while dragging or snapping,
+/// otherwise the host's resting top. It's the only view that reads `drag.top`,
+/// so per-frame changes re-render just this and the surface. Everything else the
+/// surface needs is built by the host, outside `surface`, so it's identical from
+/// frame to frame.
+private struct MantleSurfaceDriver: View {
+    let drag: MantleDragModel
+    let restingTop: CGFloat
+    let surface: (CGFloat) -> MantleSurface
+
+    var body: some View {
+        surface(drag.top ?? restingTop)
+    }
+}
+
 /// Owns interaction state; resolves geometry and the declared detents.
 struct MantleHost<Detents: View>: View {
     @Binding var selection: MantleDetent
@@ -159,12 +194,10 @@ struct MantleHost<Detents: View>: View {
 
     @Environment(\.mantleConfiguration) private var configuration
 
-    /// The detent the surface is showing / animating to. Tracks `selection`, but
-    /// lets us choose the animation when `selection` is changed from outside.
+    /// The detent the surface rests at. Tracks `selection`, but lets us choose the
+    /// animation when `selection` is changed from outside.
     @State private var displayed: MantleDetent?
-    /// Top edge of the surface while a drag is in flight.
-    @State private var dragTop: CGFloat?
-    @State private var dragStartTop: CGFloat?
+    @State private var drag = MantleDragModel()
     /// During programmatic moves, only these detents' content takes part in the
     /// cross-fade, so jumping collapsed → large doesn't flash the half content.
     @State private var fadeDetents: Set<MantleDetent>?
@@ -217,48 +250,99 @@ struct MantleHost<Detents: View>: View {
         let draggable = configuration.grabber != .hidden && layout.entries.count > 1
         let atLargest = current == layout.entries.last?.detent
 
-        return MantleSurface(
-            top: dragTop ?? restingTop,
-            layout: layout,
-            current: current,
-            fadeDetents: fadeDetents,
-            configuration: configuration,
-            isDragging: dragTop != nil,
-            showsGrabber: draggable,
-            scrollEnabled: atLargest && dragTop == nil,
-            proxy: MantleProxy(
-                detent: current,
-                detents: layout.entries.map(\.detent),
-                move: { move(to: $0, layout: layout) }
-            ),
-            tap: {
-                let destination = configuration.tapDestination.map(layout.resolve) ?? layout.entries.last!.detent
-                move(to: destination, layout: layout)
-            },
-            onRevealMarkersChange: { markers in
-                // At the largest detent the content may be scrolled, which moves the
-                // markers; keep the snap points from before scrolling started.
-                guard !atLargest || revealMarkers.isEmpty, markers != revealMarkers else { return }
-                revealMarkers = markers
-            }
+        // Built once per host render, not per frame: a new proxy every frame would
+        // change the environment and re-render every view that reads it.
+        let proxy = MantleProxy(
+            detent: current,
+            detents: layout.entries.map(\.detent),
+            move: { move(to: $0, layout: layout) }
         )
+        let tap = {
+            let destination = configuration.tapDestination.map(layout.resolve) ?? layout.entries.last!.detent
+            move(to: destination, layout: layout)
+        }
+        let onRevealMarkersChange: ([MantleRevealMarker]) -> Void = { markers in
+            // At the largest detent the content may be scrolled, which moves the
+            // markers; keep the snap points from before scrolling started.
+            guard !atLargest || revealMarkers.isEmpty, markers != revealMarkers else { return }
+            revealMarkers = markers
+        }
+        let hostFades = fadeDetents
+
+        return MantleSurfaceDriver(drag: drag, restingTop: restingTop) { top in
+            MantleSurface(
+                top: top,
+                drag: drag,
+                layout: layout,
+                current: current,
+                fadeDetents: hostFades,
+                configuration: configuration,
+                showsGrabber: draggable,
+                atLargest: atLargest,
+                proxy: proxy,
+                tap: tap,
+                onRevealMarkersChange: onRevealMarkersChange
+            )
+        }
         .gesture(dragGesture(layout: layout, start: current, restingTop: restingTop), isEnabled: draggable)
         .onChange(of: selection) { _, newValue in
+            // Changed from outside (our own snaps set `displayed` first).
             let target = layout.resolve(newValue)
             guard target != displayed else { return }
             let from = displayed ?? current
+            cancelSnap()
             fadeDetents = [from, target]
-            withAnimation(configuration.animation) { displayed = target }
+            withAnimation(configuration.animation) {
+                displayed = target
+                drag.top = nil
+            }
         }
     }
 
+    /// Moves via the proxy or a tap: snaps like a released drag, so only the
+    /// surface renders while it moves.
     private func move(to detent: MantleDetent, layout: MantleLayout) {
         let target = layout.resolve(detent)
-        let from = displayed ?? layout.resolve(selection)
-        guard target != from else { return }
-        fadeDetents = [from, target]
-        withAnimation(configuration.animation) { displayed = target }
-        selection = target
+        let current = layout.resolve(displayed ?? selection)
+        guard target != current || drag.top != nil else { return }
+        snap(
+            from: drag.top ?? layout.top(for: current),
+            to: target,
+            layout: layout,
+            fade: [current, target],
+            animation: configuration.animation
+        )
+    }
+
+    /// Animates the drag model from `top` to `target`. Only the surface renders
+    /// while it moves; the host, the selection binding and the fades are updated
+    /// once it lands.
+    private func snap(from top: CGFloat, to target: MantleDetent, layout: MantleLayout, fade: Set<MantleDetent>?, animation: Animation) {
+        drag.snapID += 1
+        let id = drag.snapID
+        drag.startTop = nil
+        drag.isActive = true
+        drag.snapFade = fade
+        drag.top = top
+        withAnimation(animation, completionCriteria: .logicallyComplete) {
+            drag.top = layout.top(for: target)
+        } completion: {
+            guard drag.snapID == id else { return }
+            // At rest: now do the expensive updates. `drag.top` and the new resting
+            // top are equal, so nothing moves.
+            fadeDetents = nil
+            displayed = target
+            if selection != target { selection = target }
+            drag.top = nil
+            drag.snapFade = nil
+            drag.isActive = false
+        }
+    }
+
+    private func cancelSnap() {
+        drag.snapID += 1
+        drag.snapFade = nil
+        drag.isActive = false
     }
 
     // MARK: Dragging
@@ -266,37 +350,39 @@ struct MantleHost<Detents: View>: View {
     private func dragGesture(layout: MantleLayout, start: MantleDetent, restingTop: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 10, coordinateSpace: .global)
             .onChanged { value in
-                let start = dragStartTop ?? (dragTop ?? restingTop)
-                if dragStartTop == nil {
-                    dragStartTop = start
-                    fadeDetents = nil
+                let startTop = drag.startTop ?? (drag.top ?? restingTop)
+                if drag.startTop == nil {
+                    // Once per drag (cancels any snap still running).
+                    drag.snapID += 1
+                    drag.startTop = startTop
+                    drag.isActive = true
+                    drag.snapFade = nil
                 }
-                dragTop = layout.rubberBanded(start + value.translation.height)
+                // Every frame: only the driver and surface read this.
+                drag.top = layout.rubberBanded(startTop + value.translation.height)
             }
             .onEnded { value in
-                let top = dragTop ?? restingTop
+                let top = drag.top ?? restingTop
                 let velocity = value.velocity.height
                 // Project where a flick would carry the surface, then pick the closest detent.
                 let projected = top + velocity * 0.18
                 let nearest = layout.entries.min { abs($0.top - projected) < abs($1.top - projected) }!
                 let target = layout.settle(from: start, proposed: nearest)
-                let skipsDetents = target.detent != nearest.detent
 
                 let distance = target.top - top
                 let relativeVelocity = abs(distance) > 1 ? velocity / distance : 0
-                let animation = Animation.interpolatingSpring(
-                    duration: 0.5,
-                    bounce: 0.12,
-                    initialVelocity: min(max(relativeVelocity, -30), 30)
+                snap(
+                    from: top,
+                    to: target.detent,
+                    layout: layout,
+                    // Jumping past intermediate detents: fade only between the two ends.
+                    fade: target.detent != nearest.detent ? [start, target.detent] : nil,
+                    animation: .interpolatingSpring(
+                        duration: 0.5,
+                        bounce: 0.12,
+                        initialVelocity: min(max(relativeVelocity, -30), 30)
+                    )
                 )
-                // Jumping past intermediate detents: fade only between the two ends.
-                fadeDetents = skipsDetents ? [start, target.detent] : nil
-                dragStartTop = nil
-                withAnimation(animation) {
-                    dragTop = nil
-                    displayed = target.detent
-                }
-                if selection != target.detent { selection = target.detent }
             }
     }
 

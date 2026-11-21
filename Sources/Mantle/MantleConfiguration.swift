@@ -204,6 +204,14 @@ public struct MantleProxy {
     public func expand() { if let last = detents.last { move(last) } }
 }
 
+extension MantleProxy: Equatable {
+    /// Compares the state, not the action: an equal proxy never invalidates the
+    /// views that read it from the environment.
+    public nonisolated static func == (lhs: MantleProxy, rhs: MantleProxy) -> Bool {
+        lhs.detent == rhs.detent && lhs.detents == rhs.detents
+    }
+}
+
 extension EnvironmentValues {
     /// The enclosing mantle. Outside a mantle, actions do nothing.
     @Entry public var mantle = MantleProxy()

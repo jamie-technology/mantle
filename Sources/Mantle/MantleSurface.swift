@@ -4,16 +4,17 @@ import SwiftUI
 /// property (frame, corner radius, cross-fades, background blend) follows the
 /// same path whether the surface is being dragged, flicked or animated.
 struct MantleSurface: View, Animatable {
+    /// The top edge: resting, dragged, or animating (see `MantleSurfaceDriver`).
     var top: CGFloat
+    let drag: MantleDragModel
     let layout: MantleLayout
     let current: MantleDetent
     let fadeDetents: Set<MantleDetent>?
     let configuration: MantleConfiguration
-    let isDragging: Bool
     let showsGrabber: Bool
-    /// Scroll views in the content only scroll at the largest detent; below it,
-    /// drags move the sheet instead.
-    let scrollEnabled: Bool
+    /// Scroll views in the content only scroll at the largest detent, at rest;
+    /// otherwise drags move the sheet instead.
+    let atLargest: Bool
     let proxy: MantleProxy
     let tap: () -> Void
     let onRevealMarkersChange: ([MantleRevealMarker]) -> Void
@@ -24,9 +25,12 @@ struct MantleSurface: View, Animatable {
     }
 
     var body: some View {
-        let frame = layout.frame(top: top)
+        let isDragging = drag.isActive
+        let scrollEnabled = atLargest && !isDragging
+        let (frame, offset) = layout.placement(top: top)
         let expansion = layout.expansion(top: top)
-        let opacities = layout.opacities(top: top, among: fadeDetents)
+        // While dragging or snapping, the drag model's fades apply.
+        let opacities = layout.opacities(top: top, among: drag.top != nil ? drag.snapFade : fadeDetents)
         let shape = RoundedRectangle(cornerRadius: layout.cornerRadius(top: top), style: .continuous)
         let isAtRest = layout.hasCollapsed && current.isCollapsed && !isDragging
 
@@ -44,7 +48,7 @@ struct MantleSurface: View, Animatable {
                 ForEach(layout.contentEntries, id: \.detent) { entry in
                     let opacity = opacities[entry.detent] ?? 0
                     let size = layout.contentSize(for: entry)
-                    let insets = layout.contentInsets(for: entry, frameTop: frame.minY)
+                    let insets = layout.contentInsets(for: entry, frameTop: top)
                     VStack(spacing: 0) {
                         ForEach(entry.content) { $0 }
                     }
@@ -73,14 +77,14 @@ struct MantleSurface: View, Animatable {
                         // sheet, even over a scrolling ScrollView.
                         if expansion > 0.5 {
                             Color.clear
-                                .frame(height: layout.grabberTop(frameTop: frame.minY) + 20)
+                                .frame(height: layout.grabberTop(frameTop: top) + 20)
                                 .frame(maxWidth: .infinity)
                                 .contentShape(.rect)
                         }
                         Capsule()
                             .fill(.secondary)
                             .frame(width: 36, height: 5)
-                            .padding(.top, layout.grabberTop(frameTop: frame.minY))
+                            .padding(.top, layout.grabberTop(frameTop: top))
                     }
                     .accessibilityHidden(true)
                 }
@@ -99,8 +103,9 @@ struct MantleSurface: View, Animatable {
             .accessibilityAddTraits(isAtRest ? .isButton : [])
             .accessibilityAction(named: "Expand") { proxy.expand() }
             .accessibilityAction(.escape) { proxy.collapse() }
-            // `position` (not `offset`) so content gets correct safe-area insets.
             .position(x: frame.midX, y: frame.midY)
+            // Render-time slide; see `MantleLayout.placement(top:)`.
+            .offset(y: offset)
         }
         .environment(\.mantle, proxy)
     }
