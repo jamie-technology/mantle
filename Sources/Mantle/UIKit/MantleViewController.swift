@@ -18,14 +18,32 @@ public struct MantleRevealPoint: Hashable, Sendable {
     }
 }
 
+/// A view in the expanded content whose bottom edge is a snap point: the sheet
+/// shows the expanded content down to the bottom of `view`. The Auto Layout
+/// friendly counterpart of ``MantleRevealPoint``: the mantle measures the view
+/// after each layout pass and whenever its frame changes, in the coordinates of
+/// any scroll view it's in (so scrolling never moves the snap point).
+public struct MantleRevealView {
+    /// Addresses it as `.revealed(id)`. Unnamed points are `.revealed(0)`,
+    /// `.revealed(1)`, … from the top (counting reveal points and views together).
+    public var id: String?
+    public weak var view: UIView?
+    public var collapseMode: MantleCollapseMode
+
+    public init(id: String? = nil, view: UIView, collapseMode: MantleCollapseMode = .automatic) {
+        self.id = id
+        self.view = view
+        self.collapseMode = collapseMode
+    }
+}
+
 /// The UIKit mantle: a surface that floats above the tab bar as a capsule and
 /// expands into a sheet, Apple Music style.
 ///
-/// It's built for smoothness. Snaps run as `UIViewPropertyAnimator` springs that
-/// Core Animation interpolates on the render server, at the display's refresh
-/// rate, with no per-frame work in the app. A drag only updates a few layer
-/// properties per touch. Content is laid out once at fixed sizes, so moving the
-/// sheet never re-lays it out.
+/// It's built for smoothness. A drag only updates a few layer properties per
+/// touch, and snaps spring the sheet's top edge from a 120Hz display link, with
+/// the same few property updates per frame. Content is laid out once at fixed
+/// sizes (with Auto Layout, if you like), so moving the sheet never re-lays it out.
 ///
 /// ```swift
 /// let mantle = MantleViewController()
@@ -63,9 +81,14 @@ public final class MantleViewController: UIViewController, UIGestureRecognizerDe
     public var snapPoints: [MantleDetent] = [] { didSet { invalidateLayout() } }
 
     /// Snap points measured from the expanded content.
-    public var revealPoints: [MantleRevealPoint] = [] {
+    public var revealPoints: [MantleRevealPoint] = [] { didSet { updateRevealMarkers() } }
+
+    /// Views in the expanded content whose bottom edges are snap points; see
+    /// ``MantleRevealView``. Combined with `revealPoints`.
+    public var revealViews: [MantleRevealView] = [] {
         didSet {
-            revealMarkers = revealPoints.map { MantleRevealMarker(name: $0.id, maxY: $0.offset, collapseMode: $0.collapseMode) }
+            observeRevealViews()
+            measureRevealViews()
         }
     }
 
@@ -235,6 +258,9 @@ public final class MantleViewController: UIViewController, UIGestureRecognizerDe
     private var slots: [Slot: SlotContent] = [:]
     private var collapseModes: [MantleDetent: MantleCollapseMode] = [:]
     var revealMarkers: [MantleRevealMarker] = [] { didSet { if revealMarkers != oldValue { invalidateLayout() } } }
+    /// `revealViews`, as measured.
+    private var measuredRevealPoints: [MantleRevealPoint] = []
+    private var revealViewObservations: [NSKeyValueObservation] = []
 
     private(set) var layout: MantleLayout<Slot>?
     private var pendingDetent: MantleDetent?
@@ -303,6 +329,57 @@ public final class MantleViewController: UIViewController, UIGestureRecognizerDe
         super.viewDidLayoutSubviews()
         dimView.frame = view.bounds
         rebuildLayoutIfNeeded()
+        measureRevealViews()
+    }
+
+    // MARK: Reveal points
+
+    private func updateRevealMarkers() {
+        revealMarkers = (revealPoints + measuredRevealPoints).map {
+            MantleRevealMarker(name: $0.id, maxY: $0.offset, collapseMode: $0.collapseMode)
+        }
+    }
+
+    /// Measures `revealViews` in the expanded content's coordinates. Cheap, and a
+    /// no-op when nothing moved.
+    private func measureRevealViews() {
+        guard !revealViews.isEmpty || !measuredRevealPoints.isEmpty else { return }
+        var measured: [MantleRevealPoint] = []
+        if let root = slots[.expanded]?.controller.view {
+            root.layoutIfNeeded()
+            for reveal in revealViews {
+                guard let view = reveal.view, view.isDescendant(of: root) else { continue }
+                measured.append(.init(id: reveal.id, offset: Self.bottom(of: view, in: root), collapseMode: reveal.collapseMode))
+            }
+        }
+        guard measured != measuredRevealPoints else { return }
+        measuredRevealPoints = measured
+        updateRevealMarkers()
+    }
+
+    /// The bottom of `view` in `root`, as if any scroll view it's in were at its top.
+    private static func bottom(of view: UIView, in root: UIView) -> CGFloat {
+        var ancestor = view.superview
+        while let current = ancestor, current !== root {
+            if let scrollView = current as? UIScrollView, let container = scrollView.superview {
+                // In the scroll view's bounds space, which is its content's coordinates.
+                let inContent = view.convert(view.bounds, to: scrollView).maxY
+                let origin = container.convert(scrollView.frame, to: root).minY
+                return origin + scrollView.adjustedContentInset.top + inContent
+            }
+            ancestor = current.superview
+        }
+        return view.convert(view.bounds, to: root).maxY
+    }
+
+    /// Re-measures when a reveal view's frame changes (Auto Layout, Dynamic Type…).
+    private func observeRevealViews() {
+        let handler: @Sendable (Any, Any) -> Void = { [weak self] _, _ in
+            DispatchQueue.main.async { self?.measureRevealViews() }
+        }
+        revealViewObservations = revealViews.compactMap(\.view).flatMap { view in
+            [view.layer.observe(\.bounds, changeHandler: handler), view.layer.observe(\.position, changeHandler: handler)]
+        }
     }
 
     public override func viewSafeAreaInsetsDidChange() {

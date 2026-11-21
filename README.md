@@ -36,7 +36,7 @@ TabView { … }
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick start](#quick-start)
-- [Demo app](#demo-app)
+- [Demo apps](#demo-apps)
 - [Engines](#engines)
 - [UIKit API](#uikit-api)
 - [Detents](#detents)
@@ -95,9 +95,16 @@ struct ContentView: View {
 
 This gives you a mini player above the tab bar and a full-height player. Tap or drag the mini player up to open it, and drag the player down to close it.
 
-## Demo app
+## Demo apps
 
-`Examples/MantleDemo` is a mock music app that shows off most of the API. Open `Examples/MantleDemo/Mantle Demo.xcodeproj` and run the **Mantle Demo** scheme. It uses this package from the repo root (`../..`), so it always builds against the code next to it.
+There are two, both mock music apps:
+
+- **`Examples/MantleDemo`**: SwiftUI, using the `.mantle` API on either engine.
+- **`Examples/MantleUIKitDemo`**: pure UIKit, with no SwiftUI and Auto Layout everywhere, built on `MantleViewController`. See [the UIKit demo](#the-uikit-demo).
+
+### The SwiftUI demo
+
+`Examples/MantleDemo` shows off most of the API. Open `Examples/MantleDemo/Mantle Demo.xcodeproj` and run the **Mantle Demo** scheme. It uses this package from the repo root (`../..`), so it always builds against the code next to it.
 
 The **Mantle** tab has settings for:
 
@@ -111,6 +118,21 @@ The **Mantle** tab has settings for:
 Launch arguments, handy for screenshots: `-engine uikit|swiftui|uikitapi` picks the engine, `-detent quarter|half|large|header|artwork` opens at a detent, and `-hideMantle YES` starts with the mantle hidden.
 
 The demo's `Info.plist` sets `CADisableMinimumFrameDurationOnPhone`, so it runs at 120Hz on ProMotion iPhones.
+
+### The UIKit demo
+
+`Examples/MantleUIKitDemo` is a UIKit app: an app delegate and scene delegate, a `UITabBarController` with a compositional-layout album grid, and a `MantleViewController` installed above the tab bar. All mantle content is UIKit with Auto Layout. Open `Examples/MantleUIKitDemo/Mantle UIKit Demo.xcodeproj`.
+
+The **Mantle** tab (a `UITableView`) switches between four demos and changes the mantle live:
+
+| Demo | Shows |
+| --- | --- |
+| Reveal views | A scrolling player as `expandedContent`. Its header and artwork groups are `revealViews`, so the snap points come from Auto Layout. `expandedCollapseMode = .target(.collapsed)`. |
+| Fixed snap points | A player as `expandedContent`, with `.quarter` and `.half` as `snapPoints` revealing its top. |
+| Per detent | Different view controllers pinned to `.quarter`, `.half` and `.large` with `setContent(_:for:)`. |
+| Tap target | `showsGrabber = false`: a tap-only bar with interactive glass, closed from code. |
+
+It also has backgrounds, dimming, show/hide (`setPresented`), and *Move to* buttons for the current demo's detents. Launch arguments: `-demo revealViews|fixedSnapPoints|perDetent|tapTarget` and `-detent header|artwork|quarter|half|large`.
 
 ## Engines
 
@@ -167,7 +189,8 @@ mantle.install(in: tabBarController)                             // above the ta
 | `setContent(_:for:)` | Pins a view controller to a detent. Pass `nil` to remove it. |
 | `expandedContent` | Shown at the largest detent (an implicit `.large`), revealed progressively by smaller ones. |
 | `snapPoints` | Detents without content of their own. |
-| `revealPoints` | Content-measured snap points (`MantleRevealPoint(id:offset:collapseMode:)`), the UIKit counterpart of reveal markers. |
+| `revealViews` | Views in the expanded content whose bottom edges are snap points (`MantleRevealView(id:view:collapseMode:)`). See [Auto Layout and reveal views](#auto-layout-and-reveal-views). |
+| `revealPoints` | Snap points at explicit offsets from the top of the expanded content (`MantleRevealPoint(id:offset:collapseMode:)`). Combined with `revealViews`. |
 | `setCollapseMode(_:for:)`, `expandedCollapseMode` | See [collapse targets](#collapse-targets). |
 | `detent`, `detents`, `onDetentChange` | The settled detent, all resting detents, and a callback when it settles somewhere new. |
 | `move(to:animated:)`, `collapse()`, `expand()` | Move it. A reveal point that hasn't been measured yet is remembered until it has. |
@@ -177,6 +200,35 @@ mantle.install(in: tabBarController)                             // above the ta
 | `install(in:)`, `uninstall()` | `install(in: UITabBarController)` puts it above the tab bar and insets every tab. `install(in: UIViewController)` puts it over any view controller. |
 
 For SwiftUI content in a `UIHostingController`, set `safeAreaRegions = []` and `sizingOptions = []`. Your content's layout then never changes as the sheet moves.
+
+### Auto Layout and reveal views
+
+**Content is laid out once, at its detent's size, and Auto Layout inside it works as usual.**
+- **Pinned content:** each pinned view controller's view is sized to its detent.
+- **Expanded content:** the expanded view controller's view is sized to the *largest* detent and pinned to the top of the sheet.
+- **Moving the sheet never resizes either,** so your constraints aren't re-solved during drags or snaps. They're re-solved only on real size changes, like rotation.
+
+**Smaller snap points clip the expanded content.** They show the top of the same, fully rendered view. To reveal a stack group by group, list the groups as `revealViews`:
+
+```swift
+let player = PlayerViewController()             // a top-aligned stack: header, controls, lyrics, queue
+mantle.expandedContent = player                 // rendered whole, at the largest size
+player.loadViewIfNeeded()
+mantle.revealViews = [                          // a snap point at the bottom of each group
+    MantleRevealView(id: "header", view: player.header),
+    MantleRevealView(id: "controls", view: player.controls),
+    MantleRevealView(id: "lyrics", view: player.lyrics),
+]                                               // the queue is revealed at .large
+```
+
+- **Measured after layout.** After each layout pass, the mantle measures each view's bottom edge in the expanded content's coordinates. It shows the content down to that edge, plus the home-indicator area.
+- **Scroll-independent.** Inside a scroll view, views are measured in the scroll **content's** coordinates, as if it were scrolled to the top, so scrolling never moves a snap point.
+- **Live.** Frame changes (Auto Layout updates, Dynamic Type, content changes) re-measure through KVO, so snap points follow your layout.
+- **Named or numbered.** Address them as `.revealed("id")`, or `.revealed(0)`, `.revealed(1)`, … from the top if unnamed. Each can have its own `collapseMode`.
+- **Top-align the content.** The sheet reveals it from the top down.
+- **Spacing below a group** sits under its snap point, so a stop doesn't show part of the next group.
+
+Content that should *change* per size, rather than just be revealed, belongs in `setContent(_:for:)`. You can mix both.
 
 ## Detents
 
@@ -536,7 +588,7 @@ Configuration modifiers set environment values, so apply them anywhere above the
 | `MantleLayout.swift` | Pure geometry: where each detent rests, the surface frame, corner radius, content insets and cross-fade weights at any top-edge position. |
 | `MantleSurface.swift` | Draws the surface. It's `Animatable` on its top edge, so every derived property follows the same path whether it's dragged, flicked or animated. Also the background blending. |
 | `MantleConfiguration.swift` | Backgrounds, collapsed layout, content inset modes, configuration modifiers, and the `MantleProxy` environment value. |
-| `Examples/MantleDemo` | The [demo app](#demo-app). Not part of the package, so it isn't built for apps that depend on Mantle. |
+| `Examples/MantleDemo`, `Examples/MantleUIKitDemo` | The [demo apps](#demo-apps). Not part of the package, so they aren't built for apps that depend on Mantle. |
 | `UIKit/MantleViewController.swift` | The UIKit engine and API: layout, pan and scroll-view cooperation, spring snaps, tab bar installation. |
 | `UIKit/MantleSurfaceView.swift` | The UIKit surface: glass, blur or colour background with cross-fade, continuous-corner clipping, grabber. |
 | `UIKit/MantleFrameDriver.swift` | The 120Hz display link that samples snap springs. |
