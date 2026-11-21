@@ -9,6 +9,14 @@ An Apple Music–style "now playing" surface for SwiftUI and UIKit: a bar that f
 - **Content per detent**: different views pinned to each detent and cross-faded, or one expanded view that bigger detents reveal progressively.
 - **Two engines, three ways to use it**: the SwiftUI `.mantle` API on a SwiftUI engine or a [UIKit engine](#engines) that runs at the display's full refresh rate, or [`MantleViewController`](#uikit-api) directly from UIKit.
 
+<p align="center">
+  <img src="Docs/collapsed.png" width="200" alt="Collapsed: a glass mini player floating above the tab bar">
+  <img src="Docs/header.png" width="200" alt="The first reveal snap point: the player's header and scrubber">
+  <img src="Docs/artwork.png" width="200" alt="The second reveal snap point: the artwork and transport controls">
+  <img src="Docs/large.png" width="200" alt="Large: the full player with the Up Next queue">
+</p>
+<p align="center"><sub>Collapsed, two content-measured snap points, and large. From the demo app, on the UIKit engine.</sub></p>
+
 ```swift
 TabView { … }
     .mantle(selection: $detent) {
