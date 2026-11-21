@@ -251,7 +251,7 @@ ScrollView {
 
 ## Controlling the mantle
 
-**Selection binding.** The mantle animates whenever the binding changes, and writes back to it when the user drags or taps. That includes reveal snap points, by index or by name:
+**Selection binding.** The mantle animates whenever the binding changes. When the user drags, taps, or you move it through the proxy, it writes back once the sheet has **settled** at its new detent, not when the gesture ends. Doing it then keeps the re-render it causes away from frames that are still moving. That includes reveal snap points, by index or by name:
 
 ```swift
 @State private var detent: MantleDetent = .collapsed
@@ -335,7 +335,7 @@ Outside a mantle the proxy is inert, and its actions do nothing.
 ```
 
 - Glass can't be faded with opacity. If either end is glass, the glass is the base layer and the other background fades in or out on top of it.
-- While collapsed, the glass is interactive (the system's press response).
+- In tap-target mode (`.mantleGrabber(.hidden)`), the collapsed glass is interactive (the system's press response). In sheet mode it isn't: that recogniser would compete with the drag, and toggling it rebuilds the glass.
 - Non-glass collapsed backgrounds get a soft shadow, which fades as the mantle opens.
 
 ### Shape and size

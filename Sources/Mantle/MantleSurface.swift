@@ -12,9 +12,6 @@ struct MantleSurface: View, Animatable {
     let fadeDetents: Set<MantleDetent>?
     let configuration: MantleConfiguration
     let showsGrabber: Bool
-    /// Scroll views in the content only scroll at the largest detent, at rest;
-    /// otherwise drags move the sheet instead.
-    let atLargest: Bool
     let proxy: MantleProxy
     let tap: () -> Void
     let onRevealMarkersChange: ([MantleRevealMarker]) -> Void
@@ -25,14 +22,18 @@ struct MantleSurface: View, Animatable {
     }
 
     var body: some View {
-        let isDragging = drag.isActive
-        let scrollEnabled = atLargest && !isDragging
+        let isDragging = drag.isDragging
+        // Derived from the position, not the resting detent (which only updates once
+        // a snap has fully stopped), so nothing visible waits for that.
+        let atRestTop = abs(top - layout.restTop) < 4
+        let atLargestTop = abs(top - layout.largestTop) < 4
+        let scrollEnabled = atLargestTop && !isDragging
         let (frame, offset) = layout.placement(top: top)
         let expansion = layout.expansion(top: top)
         // While dragging or snapping, the drag model's fades apply.
         let opacities = layout.opacities(top: top, among: drag.top != nil ? drag.snapFade : fadeDetents)
         let shape = RoundedRectangle(cornerRadius: layout.cornerRadius(top: top), style: .continuous)
-        let isAtRest = layout.hasCollapsed && current.isCollapsed && !isDragging
+        let isAtRest = layout.hasCollapsed && atRestTop && !isDragging
 
         ZStack(alignment: .topLeading) {
             if configuration.dimsBackground, layout.hasCollapsed {
@@ -40,7 +41,7 @@ struct MantleSurface: View, Animatable {
                     .opacity(0.25 * expansion)
                     .contentShape(.rect)
                     .onTapGesture { proxy.collapse() }
-                    .allowsHitTesting(!current.isCollapsed && !isDragging)
+                    .allowsHitTesting(!atRestTop && !isDragging)
                     .accessibilityHidden(true)
             }
 
@@ -60,7 +61,10 @@ struct MantleSurface: View, Animatable {
                     // safe area whenever the sheet touches an edge.)
                     .frame(width: size.width, height: size.height, alignment: .top)
                     .frame(width: frame.width, alignment: .top)
-                    .opacity(opacity)
+                    // Never fully 0: SwiftUI doesn't draw opacity-0 views, so the
+                    // first frame they became visible would have to build their whole
+                    // render tree, hitching the start of a drag.
+                    .opacity(max(opacity, 0.001))
                     .allowsHitTesting(opacity > 0.5)
                     .accessibilityHidden(opacity < 0.5)
                 }
@@ -94,7 +98,10 @@ struct MantleSurface: View, Animatable {
                 collapsed: configuration.background,
                 expanded: configuration.expandedBackground,
                 expansion: layout.hasCollapsed ? expansion : 1,
-                interactive: isAtRest,
+                // Constant, never toggled: switching it rebuilds the glass, which hitched
+                // the first frame of a drag. Only in tap-target mode, where there's no
+                // drag for its own press-and-stretch recogniser to compete with.
+                interactive: layout.hasCollapsed && !showsGrabber,
                 shape: shape
             ))
             .contentShape(shape)

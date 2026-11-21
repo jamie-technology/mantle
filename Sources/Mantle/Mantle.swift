@@ -165,9 +165,14 @@ final class MantleDragModel {
     var top: CGFloat?
     /// Dragging or snapping.
     var isActive = false
+    /// A finger is dragging the surface.
+    var isDragging = false
     /// Cross-fade restriction for the current snap (see `fadeDetents`).
     var snapFade: Set<MantleDetent>?
     @ObservationIgnored var startTop: CGFloat?
+    /// The translation when the drag was recognised, so the sheet doesn't jump by
+    /// the recognition distance.
+    @ObservationIgnored var startTranslation: CGFloat = 0
     /// Bumped by every snap, so a superseded snap's completion does nothing.
     @ObservationIgnored var snapID = 0
 }
@@ -278,7 +283,6 @@ struct MantleHost<Detents: View>: View {
                 fadeDetents: hostFades,
                 configuration: configuration,
                 showsGrabber: draggable,
-                atLargest: atLargest,
                 proxy: proxy,
                 tap: tap,
                 onRevealMarkersChange: onRevealMarkersChange
@@ -322,14 +326,17 @@ struct MantleHost<Detents: View>: View {
         let id = drag.snapID
         drag.startTop = nil
         drag.isActive = true
+        drag.isDragging = false
         drag.snapFade = fade
         drag.top = top
-        withAnimation(animation, completionCriteria: .logicallyComplete) {
+        // `.removed`: only once the spring has completely stopped, so the expensive
+        // updates below can't hitch a frame that's still moving. Nothing visible
+        // waits for this: the surface derives its rest state from its position.
+        withAnimation(animation, completionCriteria: .removed) {
             drag.top = layout.top(for: target)
         } completion: {
             guard drag.snapID == id else { return }
-            // At rest: now do the expensive updates. `drag.top` and the new resting
-            // top are equal, so nothing moves.
+            // `drag.top` and the new resting top are equal, so nothing moves.
             fadeDetents = nil
             displayed = target
             if selection != target { selection = target }
@@ -343,6 +350,7 @@ struct MantleHost<Detents: View>: View {
         drag.snapID += 1
         drag.snapFade = nil
         drag.isActive = false
+        drag.isDragging = false
     }
 
     // MARK: Dragging
@@ -355,35 +363,42 @@ struct MantleHost<Detents: View>: View {
                     // Once per drag (cancels any snap still running).
                     drag.snapID += 1
                     drag.startTop = startTop
+                    drag.startTranslation = value.translation.height
                     drag.isActive = true
+                    drag.isDragging = true
                     drag.snapFade = nil
                 }
-                // Every frame: only the driver and surface read this.
-                drag.top = layout.rubberBanded(startTop + value.translation.height)
+                // Every frame: only the driver and surface read this. Measured from
+                // where the drag was recognised, so the sheet doesn't jump.
+                drag.top = layout.rubberBanded(startTop + value.translation.height - drag.startTranslation)
             }
             .onEnded { value in
-                let top = drag.top ?? restingTop
-                let velocity = value.velocity.height
-                // Project where a flick would carry the surface, then pick the closest detent.
-                let projected = top + velocity * 0.18
-                let nearest = layout.entries.min { abs($0.top - projected) < abs($1.top - projected) }!
-                let target = layout.settle(from: start, proposed: nearest)
-
-                let distance = target.top - top
-                let relativeVelocity = abs(distance) > 1 ? velocity / distance : 0
-                snap(
-                    from: top,
-                    to: target.detent,
-                    layout: layout,
-                    // Jumping past intermediate detents: fade only between the two ends.
-                    fade: target.detent != nearest.detent ? [start, target.detent] : nil,
-                    animation: .interpolatingSpring(
-                        duration: 0.5,
-                        bounce: 0.12,
-                        initialVelocity: min(max(relativeVelocity, -30), 30)
-                    )
-                )
+                release(top: drag.top ?? restingTop, velocity: value.velocity.height, from: start, layout: layout)
             }
+    }
+
+    /// Ends a drag that started at `start`, released at `top` moving at `velocity`
+    /// (points per second): snaps to the detent a flick would carry it to.
+    private func release(top: CGFloat, velocity: CGFloat, from start: MantleDetent, layout: MantleLayout) {
+        // Project where a flick would carry the surface, then pick the closest detent.
+        let projected = top + velocity * 0.18
+        let nearest = layout.entries.min { abs($0.top - projected) < abs($1.top - projected) }!
+        let target = layout.settle(from: start, proposed: nearest)
+
+        let distance = target.top - top
+        let relativeVelocity = abs(distance) > 1 ? velocity / distance : 0
+        snap(
+            from: top,
+            to: target.detent,
+            layout: layout,
+            // Jumping past intermediate detents: fade only between the two ends.
+            fade: target.detent != nearest.detent ? [start, target.detent] : nil,
+            animation: .interpolatingSpring(
+                duration: 0.5,
+                bounce: 0.12,
+                initialVelocity: min(max(relativeVelocity, -30), 30)
+            )
+        )
     }
 
     // MARK: Entries
