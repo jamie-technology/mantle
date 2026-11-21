@@ -21,6 +21,18 @@ enum BackgroundChoice: String, CaseIterable, Identifiable {
     }
 }
 
+enum DemoEngine: String, CaseIterable, Identifiable {
+    case uiKit = "uikit", swiftUI = "swiftui", uiKitAPI = "uikitapi"
+    var id: Self { self }
+    var title: String {
+        switch self {
+        case .uiKit: "UIKit"
+        case .swiftUI: "SwiftUI"
+        case .uiKitAPI: "UIKit API"
+        }
+    }
+}
+
 struct ContentView: View {
     // `-detent half` / `-detent artwork` etc. on launch, handy for screenshots.
     @State private var detent: MantleDetent = Self.launchDetent
@@ -45,6 +57,8 @@ struct ContentView: View {
     @State private var middleStepsDown = false
     @State private var isPlaying = false
     @State private var mode = Mode.reveal
+    // `-engine swiftui|uikit|uikitapi` on launch picks the engine.
+    @State private var engine = DemoEngine(rawValue: UserDefaults.standard.string(forKey: "engine") ?? "") ?? .uiKit
 
     enum Mode: String, CaseIterable, Identifiable {
         case reveal = "Reveal markers"
@@ -62,6 +76,16 @@ struct ContentView: View {
     }
 
     var body: some View {
+        if engine == .uiKitAPI {
+            // The same idea built directly on `MantleViewController`, no SwiftUI `.mantle`.
+            UIKitAPIDemo(engine: $engine)
+                .ignoresSafeArea()
+        } else {
+            swiftUIMantle
+        }
+    }
+
+    private var swiftUIMantle: some View {
         // One `.mantle` call with the mode switch inside the builder, so changing
         // modes keeps the same TabView (and its selected tab).
         tabs.mantle(isPresented: $showsMantle, selection: $detent) {
@@ -91,6 +115,7 @@ struct ContentView: View {
         .mantleBackground(collapsedBackground.background, expanded: expandedBackground.background)
         .mantleGrabber(showsGrabber ? .visible : .hidden)
         .mantleDimming(dims)
+        .mantleEngine(engine == .swiftUI ? .swiftUI : .uiKit)
     }
 
     private var middleCollapseMode: MantleCollapseMode {
@@ -108,6 +133,15 @@ struct ContentView: View {
             Tab("Mantle", systemImage: "slider.horizontal.3") {
                 NavigationStack {
                     Form {
+                        Section {
+                            Picker("Engine", selection: $engine) {
+                                ForEach(DemoEngine.allCases) { Text($0.title) }
+                            }
+                        } header: {
+                            Text("Engine")
+                        } footer: {
+                            Text("UIKit: the SwiftUI API, animated by UIKit on the render server at the display's full refresh rate. SwiftUI: SwiftUI views and animations. UIKit API: `MantleViewController` used directly.")
+                        }
                         Section("Content") {
                             Picker("Mode", selection: $mode) {
                                 ForEach(Mode.allCases) { Text($0.rawValue) }

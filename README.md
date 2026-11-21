@@ -1,12 +1,13 @@
 # Mantle
 
-An Apple Music–style "now playing" surface for SwiftUI: a bar that floats above the tab bar, and expands into a sheet you can drag between detents.
+An Apple Music–style "now playing" surface for SwiftUI and UIKit: a bar that floats above the tab bar, and expands into a sheet you can drag between detents.
 
 - **Collapsed**: a capsule that sits just above the tab bar. It measures the real tab bar, so it lines up on every device.
 - **Expanded**: an edge-to-edge sheet that covers the tab bar. It snaps between detents: fixed sizes, fractions of the screen, or sizes measured from your content.
 - **Backgrounds**: Liquid Glass, blur or opaque. The expanded sheet can use a different background, which fades in as it opens.
 - **Two ways to interact**: draggable like a sheet (with a grabber), or a plain tap target that you open and close from code.
 - **Content per detent**: different views pinned to each detent and cross-faded, or one expanded view that bigger detents reveal progressively.
+- **Two engines, three ways to use it**: the SwiftUI `.mantle` API on a SwiftUI engine or a [UIKit engine](#engines) that runs at the display's full refresh rate, or [`MantleViewController`](#uikit-api) directly from UIKit.
 
 ```swift
 TabView { … }
@@ -28,6 +29,8 @@ TabView { … }
 - [Installation](#installation)
 - [Quick start](#quick-start)
 - [Demo app](#demo-app)
+- [Engines](#engines)
+- [UIKit API](#uikit-api)
 - [Detents](#detents)
 - [Declaring content](#declaring-content)
   - [Pinned content](#pinned-content)
@@ -50,6 +53,7 @@ TabView { … }
 
 - iOS 26 or later (it uses Liquid Glass and `Group(subviews:)`)
 - Swift tools 6.4
+- For 120Hz on ProMotion iPhones, your app's `Info.plist` needs `CADisableMinimumFrameDurationOnPhone` set to `YES`. Without it, animations are capped at 60Hz.
 
 ## Installation
 
@@ -89,13 +93,82 @@ This gives you a mini player above the tab bar and a full-height player. Tap or 
 
 The **Mantle** tab has settings for:
 
+- **Engine.** *UIKit* (the default in the demo), *SwiftUI*, or *UIKit API*, which swaps the app for a plain `UITabBarController` with a `MantleViewController`: a UIKit mini player and a hosted SwiftUI player.
 - **Content mode.** *Reveal markers* is a scrolling player with named reveal snap points (`"header"`, `"artwork"`). *Fixed snap points* uses `.quarter`, `.half` and `.large`, revealing one player. *Per detent* has different content pinned to each detent.
 - **Backgrounds** for the collapsed and expanded states.
 - **Showing and hiding** the mantle (`isPresented`), the grabber, and dimming.
 - **Dismissing.** Opts the middle snap point out of the inherited collapse target, with `.mantleCollapseMode(.nearest)`.
 - **Move to.** Buttons that set the selection to each of the current mode's detents.
 
-Launch arguments, handy for screenshots: `-detent quarter|half|large|header|artwork` opens at a detent, and `-hideMantle YES` starts with the mantle hidden.
+Launch arguments, handy for screenshots: `-engine uikit|swiftui|uikitapi` picks the engine, `-detent quarter|half|large|header|artwork` opens at a detent, and `-hideMantle YES` starts with the mantle hidden.
+
+The demo's `Info.plist` sets `CADisableMinimumFrameDurationOnPhone`, so it runs at 120Hz on ProMotion iPhones.
+
+## Engines
+
+The SwiftUI `.mantle` API runs on one of two engines. Pick with `.mantleEngine(_:)`:
+
+```swift
+TabView { … }
+    .mantle(selection: $detent) { … }
+    .mantleEngine(.uiKit)
+```
+
+| | `.swiftUI` (default) | `.uiKit` |
+| --- | --- | --- |
+| What moves the sheet | SwiftUI views and animations | A UIKit `MantleViewController`, installed directly in the `TabView`'s tab bar controller |
+| Expand/collapse, measured on an iPhone 17 Pro Max | ~56fps, a few hitches | ~106fps, no hitches |
+| App main-thread time per frame while moving (95th percentile) | ~7.5ms | ~1.7ms |
+| Touch hit-testing | Through the SwiftUI view tree | Only the mantle's own views |
+| Pull to dismiss from a scrolled list | No | Yes |
+| Snaps to and from the bar | The morph happens between the bar and the first detent | Apple Music style: the morph spreads over the whole trip |
+
+Measurements are from a scripted expand/collapse loop in the demo, recorded with Instruments' Animation Hitches template. Each build was installed explicitly, and the trace's symbols were checked to confirm which engine ran.
+
+**How the UIKit engine works.**
+- **Gestures:** a `UIPanGestureRecognizer` that cooperates with scroll views in the content.
+- **Motion:** each snap springs only the sheet's top edge (a SwiftUI `Spring`, sampled by a 120Hz display link). The shape, cross-fades and background are derived from that position on every frame, so a bounce never squashes the sheet.
+- **Cheap frames:** each frame is a handful of layer property sets. Content is laid out once, at fixed sizes, so moving the sheet never re-lays it out.
+
+**Detent content on the UIKit engine** stays SwiftUI. Each detent's content is hosted in its own `UIHostingController`, which gets the surrounding environment (`\.self`) and the mantle proxy. Environment values set *above* the `.mantle` call reach your content. The hosting controllers ignore UIKit's safe area, so the mantle passes the home-indicator inset in as `.safeAreaPadding`.
+
+**Springs.** The UIKit engine uses `.mantleSpring(_:collapse:)`:
+- the main spring, default `Spring(duration: 0.5, bounce: 0.12)`, for moves between sheet detents;
+- the `collapse` spring, default `Spring(duration: 0.3, bounce: 0.06)`, for moves to and from the collapsed bar.
+
+The SwiftUI engine uses `.mantleAnimation(_:)`.
+
+## UIKit API
+
+`MantleViewController` is the UIKit engine itself, for UIKit apps:
+
+```swift
+let mantle = MantleViewController()
+mantle.setContent(MiniPlayerViewController(), for: .collapsed)   // pinned content
+mantle.expandedContent = UIHostingController(rootView: NowPlaying().environment(\.mantle, mantle.proxy))
+mantle.snapPoints = [.half]                                      // content-less detents
+mantle.expandedCollapseMode = .target(.collapsed)
+mantle.background = .glass
+mantle.expandedBackground = .opaque
+mantle.onDetentChange = { detent in … }
+mantle.install(in: tabBarController)                             // above the tab bar; insets every tab
+```
+
+| Member | |
+| --- | --- |
+| `setContent(_:for:)` | Pins a view controller to a detent. Pass `nil` to remove it. |
+| `expandedContent` | Shown at the largest detent (an implicit `.large`), revealed progressively by smaller ones. |
+| `snapPoints` | Detents without content of their own. |
+| `revealPoints` | Content-measured snap points (`MantleRevealPoint(id:offset:collapseMode:)`), the UIKit counterpart of reveal markers. |
+| `setCollapseMode(_:for:)`, `expandedCollapseMode` | See [collapse targets](#collapse-targets). |
+| `detent`, `detents`, `onDetentChange` | The settled detent, all resting detents, and a callback when it settles somewhere new. |
+| `move(to:animated:)`, `collapse()`, `expand()` | Move it. A reveal point that hasn't been measured yet is remembered until it has. |
+| `setPresented(_:animated:)`, `isPresented` | Hide or show the whole mantle, collapsed bar included. |
+| `proxy` | A `MantleProxy` for hosted SwiftUI content's `\.mantle` environment. Its actions always act on the mantle as it is now. |
+| `background`, `expandedBackground`, `showsGrabber`, `dimsBackground`, `collapsedLayout`, `cornerRadius`, `tapDestination`, `spring`, `collapseSpring`, `contentInsetMode` | The same options as the SwiftUI modifiers. |
+| `install(in:)`, `uninstall()` | `install(in: UITabBarController)` puts it above the tab bar and insets every tab. `install(in: UIViewController)` puts it over any view controller. |
+
+For SwiftUI content in a `UIHostingController`, set `safeAreaRegions = []` and `sizingOptions = []`. Your content's layout then never changes as the sheet moves.
 
 ## Detents
 
@@ -308,7 +381,9 @@ Outside a mantle the proxy is inert, and its actions do nothing.
 - **Dragging.** Drag anywhere on the surface to move it. The top edge follows your finger, and dragging past the smallest or largest detent rubber-bands.
 - **Snapping.** On release, the mantle projects where a flick would carry it and snaps to the closest detent, or to its [collapse target](#collapse-targets). The snap spring starts at your release velocity.
 - **Tapping the collapsed bar.** Opens it to the tap destination. That defaults to the largest detent; change it with `.mantleTapDestination(_:)`.
-- **Scroll views in the content.** These only scroll at the **largest** detent. Below it, scrolling is turned off so drags move the sheet. At the largest detent, the strip around the grabber still drags the sheet down, even over a scroll view.
+- **Scroll views in the content.** These only scroll at the **largest** detent. Below it, drags move the sheet and the content stays where it was.
+  - **SwiftUI engine:** at the largest detent, the strip around the grabber still drags the sheet down, even over a scroll view.
+  - **UIKit engine:** like a UIKit sheet. At the largest detent, a scrolled list scrolls. A list at its top scrolls when you push up and moves the sheet when you pull down. If you scroll back up to the top and keep pulling, the sheet takes over mid-gesture (pull to dismiss). Leaving the largest detent for a smaller one scrolls the list back to its top, since snap points are measured from the top of the content.
 
 ### Without a grabber
 
@@ -334,6 +409,11 @@ Outside a mantle the proxy is inert, and its actions do nothing.
 .mantleBackground(.glass, expanded: .opaque)
 ```
 
+- Each background has a UIKit form for the UIKit engine and `MantleViewController`:
+  - **Glass:** SwiftUI `Glass` maps by equality (`.regular`, `.clear`). A tint can't be read back out of a `Glass`, so tinted glass becomes plain regular glass in UIKit.
+  - **Materials:** map to the matching `UIBlurEffect` style.
+  - **Colours:** convert directly. Other shape styles use the system background colour.
+  - **Exact UIKit backgrounds:** use `.glass(uiKit:tint:)`, `.blur(uiKit:)` or `.opaque(uiKit:)`. These also map back to SwiftUI.
 - Glass can't be faded with opacity. If either end is glass, the glass is the base layer and the other background fades in or out on top of it.
 - In tap-target mode (`.mantleGrabber(.hidden)`), the collapsed glass is interactive (the system's press response). In sheet mode it isn't: that recogniser would compete with the drag, and toggling it rebuilds the glass.
 - Non-glass collapsed backgrounds get a soft shadow, which fades as the mantle opens.
@@ -350,7 +430,12 @@ Outside a mantle the proxy is inert, and its actions do nothing.
 - `horizontalInset`: gap between the bar and the leading and trailing screen edges.
 - `bottomInset`: gap between the bar and the top of the tab bar. With no visible tab bar, it's the gap above the bottom safe area.
 
-The surface's corner radius, side insets and bottom gap all morph from the capsule into the sheet over the trip from the collapsed bar to the first detent above it.
+The surface's corner radius, side insets and bottom gap morph from the capsule into the sheet as it moves.
+- **Dragging, on both engines:** the morph happens over the trip from the collapsed bar to the first detent above it.
+- **UIKit engine snaps to or from the bar:** these follow Apple Music.
+  - The morph spreads over the whole trip. The sides draw in evenly, and the bottom stays on the screen's edge, over the tab bar, until the very end.
+  - The bar's content shows at the top of the card for the first 30% of the trip back to it, while the other content fades over the middle.
+  - The quick `collapse` spring overshoots only along the direction of travel: a dismiss dips just below the bar and settles.
 
 ## Tab bar integration and content insets
 
@@ -417,7 +502,9 @@ Configuration modifiers set environment values, so apply them anywhere above the
 | `.mantleCornerRadius(_:)` | 38 | Expanded sheet corner radius. |
 | `.mantleDimming(_:)` | `true` | Dim (and tap-to-collapse) behind the mantle. |
 | `.mantleTapDestination(_:)` | largest detent | Where tapping the collapsed bar goes. |
-| `.mantleAnimation(_:)` | `.spring(duration: 0.5, bounce: 0.12)` | Programmatic and tap-driven moves. Drags use a velocity-matched spring. |
+| `.mantleEngine(_:)` | `.swiftUI` | See [engines](#engines). |
+| `.mantleAnimation(_:)` | `.spring(duration: 0.5, bounce: 0.12)` | SwiftUI engine: programmatic and tap-driven moves. Drags use a velocity-matched spring. |
+| `.mantleSpring(_:collapse:)` | `Spring(duration: 0.5, bounce: 0.12)`, `Spring(duration: 0.3, bounce: 0.06)` | UIKit engine: moves between sheet detents, and moves to and from the collapsed bar. |
 | `.mantleContentInsetMode(_:)` | `.automatic` | See [content insets](#tab-bar-integration-and-content-insets). |
 | `.mantleSafeAreaInset()` | | Per-screen inset and tab bar position, in plain SwiftUI. See [content insets](#tab-bar-integration-and-content-insets). |
 | `.mantleCollapseMode(_:)` | `.automatic` | On a `Detent` or the expanded content. See [collapse targets](#collapse-targets). |
@@ -425,7 +512,8 @@ Configuration modifiers set environment values, so apply them anywhere above the
 
 ## Limitations
 
-- **Pull to dismiss from scrolled content.** At the largest detent, scrolling to the top of a scroll view and pulling down doesn't move the sheet. Use the grabber strip, the dimmed area or a close button.
+- **The SwiftUI engine renders at about 60fps** on a 120Hz screen, and has no pull to dismiss from scrolled content. Use the UIKit engine for both.
+- **UIKit engine: the content isn't one SwiftUI tree.** Each detent's content is in its own hosting controller. It receives the surrounding environment, but preferences don't flow back out of it, and some environment values may not carry over through `\.self`. The collapsed and expanded content are separate views, so matching elements (the mini player's title and the full player's header) briefly overlap during a morph instead of moving into each other.
 - **Measured snap points can go stale.** If the expanded content changes size while the sheet is at its largest detent, reveal snap points update when it next leaves that detent.
 - **No presenting-view scale effect.** Unlike system sheets, the content behind isn't scaled back while the sheet is open.
 - **Automatic mode leans on UIKit internals.** Its zero-setup path depends on SwiftUI's `TabView` being backed by a `UITabBarController`. Screens that apply `.mantleSafeAreaInset()` keep working without it. Screens that don't would lose their inset, and without any reporting screen the bar would overlap the tab bar.
@@ -441,7 +529,11 @@ Configuration modifiers set environment values, so apply them anywhere above the
 | `MantleSurface.swift` | Draws the surface. It's `Animatable` on its top edge, so every derived property follows the same path whether it's dragged, flicked or animated. Also the background blending. |
 | `MantleConfiguration.swift` | Backgrounds, collapsed layout, content inset modes, configuration modifiers, and the `MantleProxy` environment value. |
 | `Examples/MantleDemo` | The [demo app](#demo-app). Not part of the package, so it isn't built for apps that depend on Mantle. |
+| `UIKit/MantleViewController.swift` | The UIKit engine and API: layout, pan and scroll-view cooperation, spring snaps, tab bar installation. |
+| `UIKit/MantleSurfaceView.swift` | The UIKit surface: glass, blur or colour background with cross-fade, continuous-corner clipping, grabber. |
+| `UIKit/MantleFrameDriver.swift` | The 120Hz display link that samples snap springs. |
+| `UIKit/MantleUIKitHost.swift` | The SwiftUI `.mantle` API on the UIKit engine: resolves the builder, hosts each detent's content, installs the controller in the tab bar controller. |
 | `TabBarReader.swift` | A UIKit probe that measures the tab bar and applies the automatic tab insets. |
 | `MantleScreenInset.swift` | `.mantleSafeAreaInset()` and the reporter that carries screens' safe-area edges to the mantle through the environment. |
 
-The whole surface is driven by one number: the sheet's top edge. Dragging sets it directly. Snapping and programmatic moves animate it with a spring, and everything else (frame, shape, fades, backgrounds) is derived from it on every frame.
+On both engines, the whole surface is driven by one number: the sheet's top edge. Dragging sets it directly. Snapping and programmatic moves spring it, and everything else (frame, shape, fades, backgrounds) is derived from it on every frame, using the same `MantleLayout` geometry.

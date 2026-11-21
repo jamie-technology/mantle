@@ -7,7 +7,7 @@ struct MantleSurface: View, Animatable {
     /// The top edge: resting, dragged, or animating (see `MantleSurfaceDriver`).
     var top: CGFloat
     let drag: MantleDragModel
-    let layout: MantleLayout
+    let layout: MantleLayout<Subview>
     let current: MantleDetent
     let fadeDetents: Set<MantleDetent>?
     let configuration: MantleConfiguration
@@ -58,7 +58,10 @@ struct MantleSurface: View, Animatable {
                         ForEach(entry.content) { $0 }
                     }
                     .coordinateSpace(.named(MantleRevealKey.space))
-                    .padding(insets)
+                    // The home-indicator area is a safe-area inset, not padding, so
+                    // scroll views run to the bottom edge and scroll underneath it.
+                    .safeAreaPadding(.bottom, insets.bottom)
+                    .padding(EdgeInsets(top: insets.top, leading: insets.leading, bottom: 0, trailing: insets.trailing))
                     // The surface lives in a container that ignores the safe area, so
                     // the content sees zero insets and `insets` above are the only ones.
                     // (Don't add `.ignoresSafeArea()` here: it grows the frame into the

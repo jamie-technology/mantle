@@ -33,7 +33,7 @@ public extension View {
         @ViewBuilder detents: () -> Detents
     ) -> some View {
         MantleRoot(base: self, isPresented: isPresented.wrappedValue) {
-            MantleHost(selection: selection, detents: detents())
+            MantleEngineHost(selection: selection, isPresented: isPresented.wrappedValue, detents: detents())
         }
     }
 
@@ -70,7 +70,7 @@ public extension View {
         @ViewBuilder detents: () -> Detents
     ) -> some View {
         MantleRoot(base: self, isPresented: isPresented.wrappedValue) {
-            MantleStateHost(detents: detents())
+            MantleStateHost(isPresented: isPresented.wrappedValue, detents: detents())
         }
     }
 }
@@ -119,15 +119,20 @@ private struct MantleRoot<Base: View, Host: View>: View {
                     .accessibilityHidden(true)
             }
             .overlay {
-                if isPresented {
-                    // Manual mode prefers what SwiftUI reports; automatic prefers UIKit.
-                    host.environment(\.mantleTabBarTop, automatic ? tabBar.top ?? reportedTop : reportedTop ?? tabBar.top)
+                // Manual mode prefers what SwiftUI reports; automatic prefers UIKit.
+                let tabBarTop = automatic ? tabBar.top ?? reportedTop : reportedTop ?? tabBar.top
+                if configuration.engine == .uiKit {
+                    // Always present: the UIKit engine animates showing and hiding itself.
+                    host.environment(\.mantleTabBarTop, tabBarTop)
+                } else if isPresented {
+                    host.environment(\.mantleTabBarTop, tabBarTop)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
             .animation(configuration.animation, value: isPresented)
             .background {
-                TabBarReader(contentInset: automatic ? inset : 0) { measurement in
+                // The UIKit engine insets the tabs itself.
+                TabBarReader(contentInset: automatic && configuration.engine == .swiftUI ? inset : 0) { measurement in
                     withAnimation(.smooth(duration: 0.3)) { tabBar = measurement }
                 }
                 .allowsHitTesting(false)
@@ -143,10 +148,26 @@ extension EnvironmentValues {
 
 private struct MantleStateHost<Detents: View>: View {
     @State private var selection: MantleDetent = .collapsed
+    let isPresented: Bool
     let detents: Detents
 
     var body: some View {
-        MantleHost(selection: $selection, detents: detents)
+        MantleEngineHost(selection: $selection, isPresented: isPresented, detents: detents)
+    }
+}
+
+/// Picks the engine set with `.mantleEngine(_:)`.
+private struct MantleEngineHost<Detents: View>: View {
+    @Binding var selection: MantleDetent
+    let isPresented: Bool
+    let detents: Detents
+    @Environment(\.mantleConfiguration.engine) private var engine
+
+    var body: some View {
+        switch engine {
+        case .swiftUI: MantleHost(selection: $selection, detents: detents)
+        case .uiKit: MantleUIKitHost(selection: $selection, isPresented: isPresented, detents: detents)
+        }
     }
 }
 
@@ -241,6 +262,7 @@ struct MantleHost<Detents: View>: View {
                 cornerRadius: configuration.cornerRadius,
                 entries: entries,
                 expandedContent: expanded,
+                expandedCollapseMode: expanded.lazy.map(\.containerValues.mantleCollapseMode).first { $0 != .automatic } ?? .automatic,
                 revealMarkers: revealMarkers
             )
             if !layout.entries.isEmpty {
@@ -249,7 +271,7 @@ struct MantleHost<Detents: View>: View {
         }
     }
 
-    private func surface(layout: MantleLayout) -> some View {
+    private func surface(layout: MantleLayout<Subview>) -> some View {
         let current = layout.resolve(displayed ?? selection)
         let restingTop = layout.top(for: current)
         let draggable = configuration.grabber != .hidden && layout.entries.count > 1
@@ -305,7 +327,7 @@ struct MantleHost<Detents: View>: View {
 
     /// Moves via the proxy or a tap: snaps like a released drag, so only the
     /// surface renders while it moves.
-    private func move(to detent: MantleDetent, layout: MantleLayout) {
+    private func move(to detent: MantleDetent, layout: MantleLayout<Subview>) {
         let target = layout.resolve(detent)
         let current = layout.resolve(displayed ?? selection)
         guard target != current || drag.top != nil else { return }
@@ -321,7 +343,7 @@ struct MantleHost<Detents: View>: View {
     /// Animates the drag model from `top` to `target`. Only the surface renders
     /// while it moves; the host, the selection binding and the fades are updated
     /// once it lands.
-    private func snap(from top: CGFloat, to target: MantleDetent, layout: MantleLayout, fade: Set<MantleDetent>?, animation: Animation) {
+    private func snap(from top: CGFloat, to target: MantleDetent, layout: MantleLayout<Subview>, fade: Set<MantleDetent>?, animation: Animation) {
         drag.snapID += 1
         let id = drag.snapID
         drag.startTop = nil
@@ -355,7 +377,7 @@ struct MantleHost<Detents: View>: View {
 
     // MARK: Dragging
 
-    private func dragGesture(layout: MantleLayout, start: MantleDetent, restingTop: CGFloat) -> some Gesture {
+    private func dragGesture(layout: MantleLayout<Subview>, start: MantleDetent, restingTop: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 10, coordinateSpace: .global)
             .onChanged { value in
                 let startTop = drag.startTop ?? (drag.top ?? restingTop)
@@ -379,7 +401,7 @@ struct MantleHost<Detents: View>: View {
 
     /// Ends a drag that started at `start`, released at `top` moving at `velocity`
     /// (points per second): snaps to the detent a flick would carry it to.
-    private func release(top: CGFloat, velocity: CGFloat, from start: MantleDetent, layout: MantleLayout) {
+    private func release(top: CGFloat, velocity: CGFloat, from start: MantleDetent, layout: MantleLayout<Subview>) {
         // Project where a flick would carry the surface, then pick the closest detent.
         let projected = top + velocity * 0.18
         let nearest = layout.entries.min { abs($0.top - projected) < abs($1.top - projected) }!
@@ -405,9 +427,9 @@ struct MantleHost<Detents: View>: View {
 
     /// Splits the builder's subviews into declared detents and unmarked
     /// (expanded) content.
-    private static func entries(from subviews: SubviewsCollection) -> ([MantleLayout.Entry], [Subview]) {
+    private static func entries(from subviews: SubviewsCollection) -> ([MantleLayout<Subview>.Entry], [Subview]) {
         var seen = Set<MantleDetent>()
-        var result: [MantleLayout.Entry] = []
+        var result: [MantleLayout<Subview>.Entry] = []
         var expanded: [Subview] = []
         for subview in subviews {
             let values = subview.containerValues

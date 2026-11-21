@@ -45,9 +45,7 @@ struct TabBarReader: UIViewRepresentable {
         private weak var observedBar: UITabBar?
         private weak var tabBarController: UITabBarController?
         private var observations: [NSKeyValueObservation] = []
-        /// Each tab's own bottom inset before ours was added, so we add on top of
-        /// it and restore it exactly.
-        private var originalInsets: [ObjectIdentifier: (controller: Weak<UIViewController>, bottom: CGFloat)] = [:]
+        private let insetter = MantleTabInsetter()
 
         override func didMoveToWindow() {
             super.didMoveToWindow()
@@ -63,18 +61,18 @@ struct TabBarReader: UIViewRepresentable {
 
         private func measure() {
             guard let window else { return }
-            let visibleBar = Self.tabBar(in: window, visibleOnly: true)
+            let visibleBar = MantleTabBarLookup.tabBar(in: window, visibleOnly: true)
             if visibleBar !== observedBar { observe(visibleBar) }
 
             // Keep insetting the tabs while the tab bar is hidden (e.g. on a pushed
             // screen): the collapsed bar is still there.
             if tabBarController == nil || tabBarController?.view.window == nil {
-                let bar = visibleBar ?? Self.tabBar(in: window, visibleOnly: false)
-                let controller = bar.flatMap(Self.tabBarController(of:))
+                let bar = visibleBar ?? MantleTabBarLookup.tabBar(in: window, visibleOnly: false)
+                let controller = bar.flatMap(MantleTabBarLookup.tabBarController(of:))
                 if controller !== tabBarController { removeTabInsets() }
                 tabBarController = controller
             }
-            if let tabBarController { applyInsets(to: tabBarController) }
+            if let tabBarController { insetter.apply(contentInset, to: tabBarController) }
 
             let measurement = Measurement(
                 top: visibleBar.map { $0.convert($0.bounds, to: window).minY },
@@ -85,23 +83,8 @@ struct TabBarReader: UIViewRepresentable {
             onChange?(measurement)
         }
 
-        private func applyInsets(to controller: UITabBarController) {
-            for child in controller.viewControllers ?? controller.children {
-                let id = ObjectIdentifier(child)
-                let original = originalInsets[id]?.bottom ?? child.additionalSafeAreaInsets.bottom
-                originalInsets[id] = (Weak(child), original)
-                let target = original + contentInset
-                if child.additionalSafeAreaInsets.bottom != target {
-                    child.additionalSafeAreaInsets.bottom = target
-                }
-            }
-        }
-
         func removeTabInsets() {
-            for (_, entry) in originalInsets {
-                entry.controller.value?.additionalSafeAreaInsets.bottom = entry.bottom
-            }
-            originalInsets = [:]
+            insetter.remove()
             tabBarController = nil
         }
 
@@ -118,30 +101,60 @@ struct TabBarReader: UIViewRepresentable {
                 bar.observe(\.isHidden, changeHandler: handler),
             ]
         }
-
-        private static func tabBarController(of bar: UITabBar) -> UITabBarController? {
-            var responder: UIResponder? = bar
-            while let current = responder {
-                if let controller = current as? UITabBarController { return controller }
-                responder = current.next
-            }
-            return nil
-        }
-
-        private static func tabBar(in view: UIView, visibleOnly: Bool) -> UITabBar? {
-            if let bar = view as? UITabBar {
-                guard visibleOnly else { return bar }
-                return bar.isHidden || bar.alpha < 0.01 || bar.window == nil ? nil : bar
-            }
-            for subview in view.subviews where !(visibleOnly && subview.isHidden) {
-                if let bar = tabBar(in: subview, visibleOnly: visibleOnly) { return bar }
-            }
-            return nil
-        }
     }
 }
 
-private struct Weak<T: AnyObject> {
+/// Adds an inset to the bottom safe area of every tab of a tab bar controller,
+/// the way a tab view bottom accessory does. Each tab's own inset is kept, added
+/// to, and restored exactly by `remove()`.
+@MainActor
+final class MantleTabInsetter {
+    private var originalInsets: [ObjectIdentifier: (controller: Weak<UIViewController>, bottom: CGFloat)] = [:]
+
+    func apply(_ inset: CGFloat, to controller: UITabBarController) {
+        for child in controller.viewControllers ?? controller.children {
+            let id = ObjectIdentifier(child)
+            let original = originalInsets[id]?.bottom ?? child.additionalSafeAreaInsets.bottom
+            originalInsets[id] = (Weak(child), original)
+            let target = original + inset
+            if child.additionalSafeAreaInsets.bottom != target {
+                child.additionalSafeAreaInsets.bottom = target
+            }
+        }
+    }
+
+    func remove() {
+        for (_, entry) in originalInsets {
+            entry.controller.value?.additionalSafeAreaInsets.bottom = entry.bottom
+        }
+        originalInsets = [:]
+    }
+}
+
+@MainActor
+enum MantleTabBarLookup {
+    static func tabBarController(of bar: UITabBar) -> UITabBarController? {
+        var responder: UIResponder? = bar
+        while let current = responder {
+            if let controller = current as? UITabBarController { return controller }
+            responder = current.next
+        }
+        return nil
+    }
+
+    static func tabBar(in view: UIView, visibleOnly: Bool) -> UITabBar? {
+        if let bar = view as? UITabBar {
+            guard visibleOnly else { return bar }
+            return bar.isHidden || bar.alpha < 0.01 || bar.window == nil ? nil : bar
+        }
+        for subview in view.subviews where !(visibleOnly && subview.isHidden) {
+            if let bar = tabBar(in: subview, visibleOnly: visibleOnly) { return bar }
+        }
+        return nil
+    }
+}
+
+struct Weak<T: AnyObject> {
     weak var value: T?
     init(_ value: T) { self.value = value }
 }

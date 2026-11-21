@@ -2,11 +2,14 @@ import SwiftUI
 
 /// Resolved geometry for one layout pass: where every detent rests and how the
 /// surface looks at any top-edge position in between.
-struct MantleLayout {
+///
+/// Shared by both engines: `Item` is the content each detent carries (SwiftUI
+/// `Subview`s for the SwiftUI engine, content keys for the UIKit one).
+struct MantleLayout<Item> {
     struct Entry {
         let detent: MantleDetent
         /// Empty for snap-point-only detents.
-        var content: [Subview]
+        var content: [Item]
         var top: CGFloat = 0
         /// Where a downward drag from this detent goes; see `MantleCollapseMode`.
         var collapseMode: MantleCollapseMode = .automatic
@@ -28,10 +31,10 @@ struct MantleLayout {
         collapsed: MantleCollapsedLayout,
         cornerRadius: CGFloat,
         entries: [Entry],
-        expandedContent: [Subview],
+        expandedContent: [Item],
+        expandedCollapseMode: MantleCollapseMode,
         revealMarkers: [MantleRevealMarker]
     ) {
-        let expandedCollapseMode = expandedContent.lazy.map(\.containerValues.mantleCollapseMode).first { $0 != .automatic } ?? .automatic
         self.size = size
         self.safeArea = safeArea
         self.collapsed = collapsed
@@ -192,7 +195,29 @@ struct MantleLayout {
     }
 
     /// Extra sheet height below the screen, covering upward rubber-banding.
-    private static let overscroll: CGFloat = 120
+    private static var overscroll: CGFloat { 120 }
+
+    /// Geometry for an explicit morph progress `morph` (0 = the collapsed bar,
+    /// 1 = a full sheet), for snaps to and from the bar that spread the morph over
+    /// their whole trip, Apple Music style: the sides draw in evenly, while the
+    /// bottom stays on the screen's edge (over the tab bar) until the very end.
+    func placement(top: CGFloat, morph: CGFloat) -> (frame: CGRect, offset: CGFloat) {
+        guard hasCollapsed else { return placement(top: top) }
+        let p = morph.clamped
+        let inset = collapsed.horizontalInset * (1 - p)
+        let bottomGap = collapsedBottomGap * pow(1 - p, 3)
+        var height = size.height - bottomGap - top
+        if top > restTop {
+            // Overshooting past the bar: slide it, don't squash it.
+            height = collapsed.height
+        }
+        return (CGRect(x: inset, y: top, width: size.width - inset * 2, height: max(height, collapsed.height)), 0)
+    }
+
+    func cornerRadius(morph: CGFloat) -> CGFloat {
+        let p = morph.clamped
+        return collapsed.height / 2 * (1 - p) + cornerRadius * p
+    }
 
     func frame(top: CGFloat) -> CGRect {
         let p = expansion(top: top)
@@ -262,7 +287,7 @@ struct MantleLayout {
     }
 }
 
-private func smoothstep(_ edge0: CGFloat, _ edge1: CGFloat, _ x: CGFloat) -> Double {
+func smoothstep(_ edge0: CGFloat, _ edge1: CGFloat, _ x: CGFloat) -> Double {
     let t = ((x - edge0) / (edge1 - edge0)).clamped
     return Double(t * t * (3 - 2 * t))
 }

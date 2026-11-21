@@ -1,6 +1,15 @@
 import SwiftUI
+import UIKit
 
 /// What the mantle's surface is drawn with.
+///
+/// Every background has a SwiftUI form (used by the SwiftUI engine) and a UIKit
+/// form (used by ``MantleViewController`` and the UIKit engine). The SwiftUI
+/// constructors map to UIKit as closely as the types allow: `Glass` by equality
+/// (`.regular`, `.clear`; a tint can't be read back, so tinted glass becomes
+/// plain regular glass in UIKit), `Material` by kind, `Color` directly, and other
+/// shape styles to the system background colour. The `uiKit:` constructors give
+/// an exact UIKit background and map back to SwiftUI.
 public struct MantleBackground {
     enum Kind {
         case glass(Glass)
@@ -8,25 +17,75 @@ public struct MantleBackground {
         case style(AnyShapeStyle)
     }
 
+    enum UIKitKind {
+        case glass(UIGlassEffect.Style, tint: UIColor?)
+        case blur(UIBlurEffect.Style)
+        case color(UIColor)
+    }
+
     let kind: Kind
+    let uiKit: UIKitKind
 
     /// Regular Liquid Glass.
     public static var glass: MantleBackground { .glass(.regular) }
     /// Liquid Glass with a custom variant, e.g. `.glass(.regular.tint(.pink))` or `.glass(.clear)`.
-    public static func glass(_ glass: Glass) -> MantleBackground { .init(kind: .glass(glass)) }
+    public static func glass(_ glass: Glass) -> MantleBackground {
+        .init(kind: .glass(glass), uiKit: .glass(glass == .clear ? .clear : .regular, tint: nil))
+    }
+    /// Liquid Glass, specified for UIKit (and mapped to SwiftUI's `Glass`).
+    public static func glass(uiKit style: UIGlassEffect.Style, tint: UIColor? = nil) -> MantleBackground {
+        var glass: Glass = style == .clear ? .clear : .regular
+        if let tint { glass = glass.tint(Color(uiColor: tint)) }
+        return .init(kind: .glass(glass), uiKit: .glass(style, tint: tint))
+    }
 
     /// A regular blur material.
     public static var blur: MantleBackground { .blur(.regular) }
     /// A blur material, e.g. `.blur(.ultraThin)`.
-    public static func blur(_ material: Material) -> MantleBackground { .init(kind: .material(material)) }
+    public static func blur(_ material: Material) -> MantleBackground {
+        .init(kind: .material(material), uiKit: .blur(Self.blurStyle(for: material)))
+    }
+    /// A blur, specified for UIKit (and mapped to the closest SwiftUI `Material`).
+    public static func blur(uiKit style: UIBlurEffect.Style) -> MantleBackground {
+        let material: Material = switch style {
+        case .systemUltraThinMaterial: .ultraThin
+        case .systemThinMaterial: .thin
+        case .systemThickMaterial: .thick
+        case .systemChromeMaterial: .bar
+        default: .regular
+        }
+        return .init(kind: .material(material), uiKit: .blur(style))
+    }
 
     /// The system background colour.
     public static var opaque: MantleBackground { .opaque(Color(uiColor: .systemBackground)) }
-    /// Any opaque (or not) shape style: a colour, gradient, etc.
-    public static func opaque<S: ShapeStyle>(_ style: S) -> MantleBackground { .init(kind: .style(AnyShapeStyle(style))) }
+    /// Any opaque (or not) shape style: a colour, gradient, etc. Colours carry over
+    /// to UIKit; other styles use the system background colour there.
+    public static func opaque<S: ShapeStyle>(_ style: S) -> MantleBackground {
+        let color: UIColor = (style as? Color).map { UIColor($0) } ?? .systemBackground
+        return .init(kind: .style(AnyShapeStyle(style)), uiKit: .color(color))
+    }
+    /// A colour, specified for UIKit (and mapped to SwiftUI).
+    public static func opaque(uiKit color: UIColor) -> MantleBackground {
+        .init(kind: .style(AnyShapeStyle(Color(uiColor: color))), uiKit: .color(color))
+    }
 
     var isGlass: Bool {
         if case .glass = kind { true } else { false }
+    }
+
+    /// `Material` isn't introspectable, so match it against the known materials.
+    private static func blurStyle(for material: Material) -> UIBlurEffect.Style {
+        let known: [(Material, UIBlurEffect.Style)] = [
+            (.ultraThin, .systemUltraThinMaterial),
+            (.thin, .systemThinMaterial),
+            (.regular, .systemMaterial),
+            (.thick, .systemThickMaterial),
+            (.ultraThick, .systemThickMaterial),
+            (.bar, .systemChromeMaterial),
+        ]
+        let description = String(describing: material)
+        return known.first { String(describing: $0.0) == description }?.1 ?? .systemMaterial
     }
 }
 
@@ -59,7 +118,22 @@ struct MantleConfiguration {
     var dimsBackground: Bool = true
     var tapDestination: MantleDetent? = nil
     var animation: Animation = .spring(duration: 0.5, bounce: 0.12)
+    var spring = Spring(duration: 0.5, bounce: 0.12)
+    var collapseSpring = Spring(duration: 0.3, bounce: 0.06)
     var contentInsetMode: MantleContentInsetMode = .automatic
+    var engine: MantleEngine = .swiftUI
+}
+
+/// What renders and animates a SwiftUI `.mantle`.
+public enum MantleEngine: Sendable, Equatable {
+    /// SwiftUI views and animations.
+    case swiftUI
+    /// A UIKit ``MantleViewController``: the sheet is a UIKit view that moves with
+    /// Core Animation springs on the render server, at the display's full refresh
+    /// rate, and with a `UIPanGestureRecognizer` that cooperates with scroll views
+    /// (pull to dismiss from the top of a list). Detent content stays SwiftUI,
+    /// hosted in `UIHostingController`s that receive the surrounding environment.
+    case uiKit
 }
 
 /// How the content under the mantle is inset so it can scroll clear of the
@@ -168,6 +242,24 @@ public extension View {
         modifier(MantleSafeAreaInsetModifier())
     }
 
+    /// Which engine renders and animates the mantle. Defaults to `.swiftUI`.
+    func mantleEngine(_ engine: MantleEngine) -> some View {
+        transformEnvironment(\.mantleConfiguration) { $0.engine = engine }
+    }
+
+    /// The springs the UIKit engine moves with (taps, proxy moves, snaps after a
+    /// drag, which start at the finger's velocity). `collapse` is used for moves
+    /// into the collapsed bar, which read best quick and nearly bounce-free.
+    /// Defaults: `Spring(duration: 0.5, bounce: 0.12)` and
+    /// `Spring(duration: 0.3, bounce: 0.06)`. The SwiftUI engine uses
+    /// ``SwiftUICore/View/mantleAnimation(_:)``.
+    func mantleSpring(_ spring: Spring, collapse: Spring? = nil) -> some View {
+        transformEnvironment(\.mantleConfiguration) {
+            $0.spring = spring
+            if let collapse { $0.collapseSpring = collapse }
+        }
+    }
+
     /// The animation used for programmatic and tap-driven detent changes.
     func mantleAnimation(_ animation: Animation) -> some View {
         transformEnvironment(\.mantleConfiguration) { $0.animation = animation }
@@ -189,19 +281,35 @@ public struct MantleProxy {
     /// Whether the mantle is resting anywhere other than `.collapsed`.
     public var isExpanded: Bool { !detent.isCollapsed }
     let move: @MainActor (MantleDetent) -> Void
+    /// Live actions, for proxies whose detent list may be out of date (the UIKit
+    /// controller's): they go straight to the current smallest / largest detent.
+    let collapseAction: (@MainActor () -> Void)?
+    let expandAction: (@MainActor () -> Void)?
 
-    nonisolated init(detent: MantleDetent = .collapsed, detents: [MantleDetent] = [], move: @escaping @MainActor (MantleDetent) -> Void = { _ in }) {
+    nonisolated init(
+        detent: MantleDetent = .collapsed,
+        detents: [MantleDetent] = [],
+        move: @escaping @MainActor (MantleDetent) -> Void = { _ in },
+        collapse: (@MainActor () -> Void)? = nil,
+        expand: (@MainActor () -> Void)? = nil
+    ) {
         self.detent = detent
         self.detents = detents
         self.move = move
+        self.collapseAction = collapse
+        self.expandAction = expand
     }
 
     /// Animates to `detent`. Ignored if the mantle has no content for it.
     public func move(to detent: MantleDetent) { move(detent) }
     /// Animates to the smallest detent.
-    public func collapse() { if let first = detents.first { move(first) } }
+    public func collapse() {
+        if let collapseAction { collapseAction() } else if let first = detents.first { move(first) }
+    }
     /// Animates to the largest detent.
-    public func expand() { if let last = detents.last { move(last) } }
+    public func expand() {
+        if let expandAction { expandAction() } else if let last = detents.last { move(last) }
+    }
 }
 
 extension MantleProxy: Equatable {
