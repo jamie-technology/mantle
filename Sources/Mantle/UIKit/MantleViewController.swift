@@ -292,7 +292,7 @@ public final class MantleViewController: UIViewController, UIGestureRecognizerDe
     private weak var hostTabBarController: UITabBarController?
     private var tabBarObservations: [NSKeyValueObservation] = []
     private let insetter = MantleTabInsetter()
-    private var lastLayoutInputs: (CGSize, UIEdgeInsets, CGFloat?)?
+    private var lastLayoutInputs: (CGSize, UIEdgeInsets, CGRect?)?
 
     private var interactiveGlass: Bool { !showsGrabber }
 
@@ -395,16 +395,16 @@ public final class MantleViewController: UIViewController, UIGestureRecognizerDe
         view.setNeedsLayout()
     }
 
-    private func tabBarTop() -> CGFloat? {
+    private func tabBarFrame() -> CGRect? {
         guard let bar = hostTabBarController?.tabBar, !bar.isHidden, bar.alpha > 0.01, bar.window != nil else { return nil }
-        return bar.convert(bar.bounds, to: view).minY
+        return bar.convert(bar.bounds, to: view)
     }
 
     private func rebuildLayoutIfNeeded() {
         // The mantle covers the window, so the window's safe area is the one that
         // counts. (Inside a SwiftUI `TabView`'s tab bar controller, views report a
         // zero safe area: SwiftUI manages it itself.)
-        let inputs = (view.bounds.size, view.window?.safeAreaInsets ?? view.safeAreaInsets, tabBarTop())
+        let inputs = (view.bounds.size, view.window?.safeAreaInsets ?? view.safeAreaInsets, tabBarFrame())
         if let last = lastLayoutInputs, last.0 == inputs.0, last.1 == inputs.1, last.2 == inputs.2, layout != nil { return }
         lastLayoutInputs = inputs
         guard view.bounds.width > 0 else { return }
@@ -422,7 +422,7 @@ public final class MantleViewController: UIViewController, UIGestureRecognizerDe
         let layout = MantleLayout<Slot>(
             size: inputs.0,
             safeArea: EdgeInsets(top: insets.top, leading: insets.left, bottom: insets.bottom, trailing: insets.right),
-            tabBarTop: inputs.2,
+            tabBar: inputs.2,
             collapsed: collapsedLayout,
             cornerRadius: cornerRadius,
             entries: entries,

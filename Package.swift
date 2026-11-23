@@ -22,6 +22,10 @@ let package = Package(
                 .enableUpcomingFeature("ApproachableConcurrency"),
             ],
         ),
+        .testTarget(
+            name: "MantleTests",
+            dependencies: ["Mantle"]
+        ),
 
     ]
 )

@@ -501,7 +501,10 @@ The surface's corner radius, side insets and bottom gap morph from the capsule i
 
 The mantle does two things with the tab bar:
 
-- **Positioning.** The collapsed bar always sits `bottomInset` above the tab bar. That holds across devices, rotation and tab bar changes. With no tab bar, it sits above the bottom safe area.
+- **Positioning.** The mantle measures the tab bar's frame and places the collapsed bar to suit it. That holds across devices, rotation, folding and tab bar changes:
+  - **A tab bar along the bottom (iPhone):** the bar sits `bottomInset` above it, across the screen width.
+  - **A vertical tab bar at the side (iPhone Duo, folded and unfolded):** the bar sits `bottomInset` above the bottom safe area, across the content area beside the tab bar, and not attached to it. Expanded, the sheet is full width and covers the tab bar.
+  - **No tab bar:** the bar sits above the bottom safe area, across the screen width.
 - **Content insets.** Like a tab view bottom accessory, the collapsed bar is added to the bottom safe area of the content underneath. That lets scroll views scroll their last rows clear of it. The inset is the bar's `height + bottomInset`.
 
 SwiftUI safe-area changes made outside a `TabView` don't reach inside its tabs, or inside a `NavigationStack`. So each of these works through a fallback chain:

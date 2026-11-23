@@ -2,7 +2,8 @@ import SwiftUI
 import UIKit
 
 /// Bridges the mantle to the `TabView`'s UIKit tab bar controller:
-/// - reports the top of the visible tab bar, so the collapsed mantle can sit
+/// - reports the frame of the visible tab bar (along the bottom, or a vertical
+///   column at the side on iPhone Duo), so the collapsed mantle can sit
 ///   just above it;
 /// - adds `contentInset` to the bottom safe area of every tab, the way a tab view
 ///   bottom accessory does, so scroll views can scroll clear of the collapsed bar.
@@ -11,8 +12,8 @@ import UIKit
 /// hosted in its own view controller), so the tab inset has to be applied here.
 struct TabBarReader: UIViewRepresentable {
     struct Measurement: Equatable {
-        /// Top of the visible tab bar in window coordinates.
-        var top: CGFloat?
+        /// Frame of the visible tab bar in window coordinates.
+        var frame: CGRect?
         /// Whether a tab bar controller was found and its tabs are being inset.
         var insetsTabs: Bool
     }
@@ -75,7 +76,7 @@ struct TabBarReader: UIViewRepresentable {
             if let tabBarController { insetter.apply(contentInset, to: tabBarController) }
 
             let measurement = Measurement(
-                top: visibleBar.map { $0.convert($0.bounds, to: window).minY },
+                frame: visibleBar.map { $0.convert($0.bounds, to: window) },
                 insetsTabs: tabBarController != nil
             )
             guard measurement != last else { return }

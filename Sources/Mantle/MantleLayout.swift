@@ -21,13 +21,16 @@ struct MantleLayout<Item> {
     let cornerRadius: CGFloat
     /// Distance from the bottom of the screen to the bottom of the collapsed bar.
     let collapsedBottomGap: CGFloat
+    /// The horizontal span the collapsed bar sits in (before its side insets):
+    /// the full width, or the content area beside a vertical tab bar.
+    let collapsedSpan: ClosedRange<CGFloat>
     /// Sorted from the resting (lowest) detent to the largest.
     let entries: [Entry]
 
     init(
         size: CGSize,
         safeArea: EdgeInsets,
-        tabBarTop: CGFloat?,
+        tabBar: CGRect?,
         collapsed: MantleCollapsedLayout,
         cornerRadius: CGFloat,
         entries: [Entry],
@@ -40,12 +43,26 @@ struct MantleLayout<Item> {
         self.collapsed = collapsed
         self.cornerRadius = cornerRadius
 
-        let bottomGap = if let tabBarTop, tabBarTop < size.height {
-            size.height - tabBarTop + collapsed.bottomInset
-        } else {
-            safeArea.bottom + collapsed.bottomInset
+        // Where the tab bar is decides where the collapsed bar goes:
+        // - along the bottom (iPhone): just above it, across the full width;
+        // - a vertical column at the side (iPhone Duo): at the bottom of the
+        //   screen, across the content area beside it, not attached to it;
+        // - none: at the bottom, across the full width.
+        var bottomGap = safeArea.bottom + collapsed.bottomInset
+        var span: ClosedRange<CGFloat> = 0...size.width
+        if let tabBar, tabBar.width > 0, tabBar.height > 0 {
+            if tabBar.width >= tabBar.height {
+                if tabBar.midY > size.height / 2, tabBar.minY < size.height {
+                    bottomGap = size.height - tabBar.minY + collapsed.bottomInset
+                }
+            } else if tabBar.midX > size.width / 2 {
+                span = 0...max(0, min(size.width, tabBar.minX))
+            } else {
+                span = min(size.width, max(0, tabBar.maxX))...size.width
+            }
         }
         self.collapsedBottomGap = bottomGap
+        self.collapsedSpan = span
         let collapsedTop = size.height - bottomGap - collapsed.height
         let largeTop = safeArea.top
 
@@ -204,14 +221,22 @@ struct MantleLayout<Item> {
     func placement(top: CGFloat, morph: CGFloat) -> (frame: CGRect, offset: CGFloat) {
         guard hasCollapsed else { return placement(top: top) }
         let p = morph.clamped
-        let inset = collapsed.horizontalInset * (1 - p)
+        let (minX, maxX) = horizontalExtent(p)
         let bottomGap = collapsedBottomGap * pow(1 - p, 3)
         var height = size.height - bottomGap - top
         if top > restTop {
             // Overshooting past the bar: slide it, don't squash it.
             height = collapsed.height
         }
-        return (CGRect(x: inset, y: top, width: size.width - inset * 2, height: max(height, collapsed.height)), 0)
+        return (CGRect(x: minX, y: top, width: maxX - minX, height: max(height, collapsed.height)), 0)
+    }
+
+    /// The surface's leading and trailing edges at morph progress `p`: the
+    /// collapsed bar's span (inset at the sides) at 0, the full width at 1.
+    private func horizontalExtent(_ p: CGFloat) -> (minX: CGFloat, maxX: CGFloat) {
+        let collapsedMinX = collapsedSpan.lowerBound + collapsed.horizontalInset
+        let collapsedMaxX = collapsedSpan.upperBound - collapsed.horizontalInset
+        return (collapsedMinX * (1 - p), collapsedMaxX + (size.width - collapsedMaxX) * p)
     }
 
     func cornerRadius(morph: CGFloat) -> CGFloat {
@@ -220,20 +245,20 @@ struct MantleLayout<Item> {
     }
 
     func frame(top: CGFloat) -> CGRect {
-        let p = expansion(top: top)
-        let inset = collapsed.horizontalInset * (1 - p)
+        let p = hasCollapsed ? expansion(top: top) : 1
+        let (minX, maxX) = horizontalExtent(p)
         let bottomGap = hasCollapsed ? collapsedBottomGap * (1 - p) : 0
         var height = size.height - bottomGap - top
         if hasCollapsed, top > restTop {
             // Pulled down past the bar: slide it, don't squash it.
             height = collapsed.height
         }
-        return CGRect(x: inset, y: top, width: size.width - inset * 2, height: max(height, 0))
+        return CGRect(x: minX, y: top, width: maxX - minX, height: max(height, 0))
     }
 
     func contentSize(for entry: Entry) -> CGSize {
         if entry.detent.isCollapsed {
-            CGSize(width: size.width - collapsed.horizontalInset * 2, height: collapsed.height)
+            CGSize(width: collapsedSpan.upperBound - collapsedSpan.lowerBound - collapsed.horizontalInset * 2, height: collapsed.height)
         } else {
             CGSize(width: size.width, height: size.height - entry.top)
         }

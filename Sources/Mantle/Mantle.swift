@@ -95,7 +95,7 @@ private struct MantleRoot<Base: View, Host: View>: View {
     @ViewBuilder let host: Host
 
     @Environment(\.mantleConfiguration) private var configuration
-    @State private var tabBar = TabBarReader.Measurement(top: nil, insetsTabs: false)
+    @State private var tabBar = TabBarReader.Measurement(frame: nil, insetsTabs: false)
     @State private var reporter = MantleEdgeReporter()
 
     var body: some View {
@@ -120,12 +120,14 @@ private struct MantleRoot<Base: View, Host: View>: View {
             }
             .overlay {
                 // Manual mode prefers what SwiftUI reports; automatic prefers UIKit.
-                let tabBarTop = automatic ? tabBar.top ?? reportedTop : reportedTop ?? tabBar.top
+                // A screen-reported edge is a bottom tab bar's top; as a frame:
+                let reportedFrame = reportedTop.map { CGRect(x: 0, y: $0, width: 10_000, height: 1) }
+                let tabBarFrame = automatic ? tabBar.frame ?? reportedFrame : reportedFrame ?? tabBar.frame
                 if configuration.engine == .uiKit {
                     // Always present: the UIKit engine animates showing and hiding itself.
-                    host.environment(\.mantleTabBarTop, tabBarTop)
+                    host.environment(\.mantleTabBarFrame, tabBarFrame)
                 } else if isPresented {
-                    host.environment(\.mantleTabBarTop, tabBarTop)
+                    host.environment(\.mantleTabBarFrame, tabBarFrame)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
@@ -142,8 +144,8 @@ private struct MantleRoot<Base: View, Host: View>: View {
 }
 
 extension EnvironmentValues {
-    /// Top of the visible tab bar in global coordinates, measured by `MantleRoot`.
-    @Entry var mantleTabBarTop: CGFloat? = nil
+    /// Frame of the visible tab bar in global coordinates, measured by `MantleRoot`.
+    @Entry var mantleTabBarFrame: CGRect? = nil
 }
 
 private struct MantleStateHost<Detents: View>: View {
@@ -227,7 +229,7 @@ struct MantleHost<Detents: View>: View {
     /// During programmatic moves, only these detents' content takes part in the
     /// cross-fade, so jumping collapsed → large doesn't flash the half content.
     @State private var fadeDetents: Set<MantleDetent>?
-    @Environment(\.mantleTabBarTop) private var tabBarTop
+    @Environment(\.mantleTabBarFrame) private var tabBarFrame
     /// Measured reveal markers in the expanded content.
     @State private var revealMarkers: [MantleRevealMarker] = []
 
@@ -257,7 +259,7 @@ struct MantleHost<Detents: View>: View {
             let layout = MantleLayout(
                 size: size,
                 safeArea: safeArea,
-                tabBarTop: tabBarTop.map { $0 - originY },
+                tabBar: tabBarFrame.map { $0.offsetBy(dx: 0, dy: -originY) },
                 collapsed: configuration.collapsedLayout,
                 cornerRadius: configuration.cornerRadius,
                 entries: entries,
